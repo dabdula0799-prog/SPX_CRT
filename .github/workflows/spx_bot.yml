@@ -1,0 +1,39 @@
+name: SPX CRT Bot
+
+on:
+  schedule:
+    # يعمل كل 5 دقائق (بتوقيت UTC - عدّل التوقيت حسب المنطقة الزمنية المطلوبة)
+    - cron: "*/5 * * * *"
+  workflow_dispatch: # يسمح لك بتشغيله يدوياً متى شئت من تبويب Actions
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests numpy matplotlib
+
+      - name: Run bot check
+        env:
+          BYBIT_PRIMARY_SYMBOL: ${{ vars.BYBIT_PRIMARY_SYMBOL || 'BYU' }}
+          BYBIT_SECONDARY_SYMBOL: ${{ vars.BYBIT_SECONDARY_SYMBOL || 'MLU' }}
+          BYBIT_TIMEFRAME: ${{ vars.BYBIT_TIMEFRAME || '30' }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          SMTP_SERVER: ${{ secrets.SMTP_SERVER }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          EMAIL_SENDER: ${{ secrets.EMAIL_SENDER }}
+          EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
+          EMAIL_RECEIVER: ${{ secrets.EMAIL_RECEIVER }}
+        run: python main.py
