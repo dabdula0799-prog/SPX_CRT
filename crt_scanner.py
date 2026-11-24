@@ -13,8 +13,10 @@ import yfinance as yf
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "YOUR_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "YOUR_CHAT_ID")
 
-SMTP_SERVER = os.getenv("SMTP_SERVER", "smtp.gmail.com")
-SMTP_PORT = int(os.getenv("SMTP_PORT", "465"))
+SMTP_SERVER = (os.getenv("SMTP_SERVER") or "smtp.gmail.com").strip()
+_raw_port = (os.getenv("SMTP_PORT") or "465").strip()
+SMTP_PORT = int(_raw_port) if _raw_port.isdigit() else 465
+
 EMAIL_SENDER = os.getenv("EMAIL_SENDER", "YOUR_EMAIL@gmail.com")
 EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD", "YOUR_APP_PASSWORD")
 EMAIL_RECEIVER = os.getenv("EMAIL_RECEIVER", "RECEIVER_EMAIL@gmail.com")
