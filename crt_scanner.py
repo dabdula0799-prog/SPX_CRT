@@ -13,7 +13,6 @@ import yfinance as yf
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "YOUR_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "YOUR_CHAT_ID")
 
-# إعدادات البريد الإلكتروني (SMTP - مثل Gmail)
 SMTP_SERVER = os.getenv("SMTP_SERVER", "smtp.gmail.com")
 SMTP_PORT = int(os.getenv("SMTP_PORT", "465"))
 EMAIL_SENDER = os.getenv("EMAIL_SENDER", "YOUR_EMAIL@gmail.com")
@@ -28,8 +27,6 @@ SYMBOLS = [
     "COST",
     "QCOM",
     "ADBE",
-    "DNG",
-    "GNG",
     "AMZN",
     "CRWD",
     "COIN",
@@ -53,43 +50,55 @@ TIMEFRAME_CONFIG = {
         "yf_interval": "1mo",
         "yf_period": "2y",
         "resample_4h": False,
-        "lookback_bars": 4,       # يسمح بمدى أقدم (شهر، شهرين، أو أكثر)
-        "allow_unclosed": True,   # يسمح بالشمعة الشهرية الجارية غير المغلقة
+        "lookback_bars": 4,
+        "allow_unclosed": True,
     },
     "1wk": {
         "label": "الأسبوع",
         "yf_interval": "1wk",
         "yf_period": "6mo",
         "resample_4h": False,
-        "lookback_bars": 8,       # تقريباً شهر إلى شهرين
-        "allow_unclosed": False,  # تجاهل الشمعة غير المغلقة
+        "lookback_bars": 8,
+        "allow_unclosed": False,
     },
     "4h": {
         "label": "4 ساعات",
         "yf_interval": "1h",
         "yf_period": "60d",
         "resample_4h": True,
-        "lookback_bars": 80,      # تقريباً شهر إلى شهرين
-        "allow_unclosed": False,  # تجاهل الشمعة غير المغلقة
+        "lookback_bars": 80,
+        "allow_unclosed": False,
     },
 }
 
 
 # ==========================================
-# 2. جلب البيانات وحساب المؤشرات
+# 2. جلب البيانات مع إعادة المحاولة وتهدئة الطلبات
 # ==========================================
-def fetch_ohlcv(symbol: str, cfg: dict) -> pd.DataFrame:
-    """جلب بيانات OHLCV من Yahoo Finance عبر yfinance."""
-    df = yf.download(
-        tickers=symbol,
-        period=cfg["yf_period"],
-        interval=cfg["yf_interval"],
-        progress=False,
-        auto_adjust=False,
-    )
+def fetch_ohlcv(symbol: str, cfg: dict, retries: int = 3, delay: float = 2.0) -> pd.DataFrame:
+    """جلب بيانات OHLCV من Yahoo Finance مع إعادة المحاولة عند انقطاع الاتصال."""
+    last_err = None
+    df = None
+
+    for attempt in range(1, retries + 1):
+        try:
+            time.sleep(delay * attempt)
+            df = yf.download(
+                tickers=symbol,
+                period=cfg["yf_period"],
+                interval=cfg["yf_interval"],
+                progress=False,
+                auto_adjust=False,
+                threads=False,
+            )
+            if df is not None and not df.empty:
+                break
+            last_err = ValueError(f"لا توجد بيانات متاحة لـ {symbol} ({cfg['label']})")
+        except Exception as e:
+            last_err = e
 
     if df is None or df.empty:
-        raise ValueError(f"لا توجد بيانات متاحة لـ {symbol} ({cfg['label']})")
+        raise last_err or ValueError(f"لا توجد بيانات متاحة لـ {symbol} ({cfg['label']})")
 
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
@@ -130,7 +139,6 @@ def fetch_ohlcv(symbol: str, cfg: dict) -> pd.DataFrame:
 
 
 def compute_rsi(series: pd.Series, period: int = 14) -> pd.Series:
-    """حساب مؤشر RSI."""
     delta = series.diff()
     gain = delta.clip(lower=0)
     loss = -delta.clip(upper=0)
@@ -144,16 +152,15 @@ def compute_rsi(series: pd.Series, period: int = 14) -> pd.Series:
 
 
 def compute_obv(close: pd.Series, volume: pd.Series) -> pd.Series:
-    """حساب مؤشر OBV."""
     direction = np.sign(close.diff()).fillna(0)
     return (direction * volume).cumsum()
 
 
 # ==========================================
-# 3. الدايفرجنس السلبي، نسبة الذيل، والأهداف
+# 3. الدايفرجنس (سلبي وإيجابي)، نسبة الذيل، والأهداف
 # ==========================================
 def has_bearish_divergence(price: pd.Series, osc: pd.Series, start_idx: int, end_idx: int) -> bool:
-    """التحقق من وجود دايفرجنس سلبي: قمة سعرية أعلى مقابل قمة أضعف على المؤشر."""
+    """دايفرجنس سلبي: قمة سعرية أعلى مقابل قمة أضعف على المؤشر."""
     if start_idx < 1 or end_idx <= start_idx or end_idx >= len(price):
         return False
 
@@ -173,17 +180,40 @@ def has_bearish_divergence(price: pd.Series, osc: pd.Series, start_idx: int, end
     )
 
 
-def calc_upper_wick_ratio(row: pd.Series) -> float:
-    """حساب نسبة الذيل العلوي مقارنة بالمدى الكلي للشمعة."""
+def has_bullish_divergence(price: pd.Series, osc: pd.Series, start_idx: int, end_idx: int) -> bool:
+    """دايفرجنس إيجابي: قاع سعري أدنى مقابل قاع أعلى/أقوى على المؤشر."""
+    if start_idx < 1 or end_idx <= start_idx or end_idx >= len(price):
+        return False
+
+    p_win = price.iloc[start_idx : end_idx + 1]
+    if len(p_win) < 3:
+        return False
+
+    mid = len(p_win) // 2
+    first_half_min_idx = p_win.iloc[:mid].idxmin()
+    second_half_min_idx = p_win.iloc[mid:].idxmin()
+
+    if first_half_min_idx >= second_half_min_idx:
+        return False
+
+    return (price.loc[second_half_min_idx] < price.loc[first_half_min_idx]) and (
+        osc.loc[second_half_min_idx] > osc.loc[first_half_min_idx]
+    )
+
+
+def calc_wick_ratio(row: pd.Series, direction: str) -> float:
+    """حساب نسبة الذيل العلوي للسلبي أو السفلي للإيجابي مقارنة بالمدى الكلي للشمعة."""
     candle_range = row["high"] - row["low"]
     if candle_range <= 0:
         return 0.0
-    upper_wick = row["high"] - max(row["open"], row["close"])
-    return max(0.0, (upper_wick / candle_range) * 100.0)
+    if direction == "bearish":
+        wick = row["high"] - max(row["open"], row["close"])
+    else:
+        wick = min(row["open"], row["close"]) - row["low"]
+    return max(0.0, (wick / candle_range) * 100.0)
 
 
 def format_simple_price(val: float) -> str:
-    """تقريب الأهداف السعرية إلى أرقام مبسطة بدون كثرة أرقام عشرية."""
     if abs(val) >= 100:
         return f"{round(val)}"
     elif abs(val) >= 10:
@@ -192,21 +222,29 @@ def format_simple_price(val: float) -> str:
         return f"{val:.2f}".rstrip("0").rstrip(".")
 
 
-def get_remaining_targets(df: pd.DataFrame, sweep_idx: int, current_price: float) -> list[str]:
-    """استخراج حتى 3 أهداف سعرية متبقية للأسفل وتبسيط أرقامها."""
+def get_remaining_targets(
+    df: pd.DataFrame, sweep_idx: int, current_price: float, direction: str
+) -> list[str]:
+    """استخراج حتى 3 أهداف سعرية متبقية (للأسفل للسلبي، وللأعلى للإيجابي) وتبسيط أرقامها."""
     history = df.iloc[:sweep_idx]
     if history.empty:
         return []
 
-    candidate_lows = sorted(
-        [float(x) for x in history["low"] if float(x) < current_price],
-        reverse=True,
-    )
-
-    targets = []
     min_gap = max(current_price * 0.015, 0.5)
+    targets = []
 
-    for lvl in candidate_lows:
+    if direction == "bearish":
+        candidates = sorted(
+            [float(x) for x in history["low"] if float(x) < current_price],
+            reverse=True,
+        )
+    else:
+        candidates = sorted(
+            [float(x) for x in history["high"] if float(x) > current_price],
+            reverse=False,
+        )
+
+    for lvl in candidates:
         if all(abs(lvl - prev) >= min_gap for prev in [float(t) for t in targets]):
             targets.append(format_simple_price(lvl))
         if len(targets) >= 3:
@@ -242,44 +280,59 @@ def detect_crt_signals(symbol: str, interval: str, cfg: dict) -> list[tuple[str,
         range_high = float(ref_bar["high"])
         range_low = float(ref_bar["low"])
         crt_high = float(crt_bar["high"])
+        crt_low = float(crt_bar["low"])
         crt_close = float(crt_bar["close"])
 
-        # سحب السيولة من الأعلى + إغلاق شمعة CRT داخل نطاق الشمعة السابقة
-        swept_high = crt_high > range_high
         closed_inside_range = range_low <= crt_close <= range_high
-
-        if not (swept_high and closed_inside_range):
+        if not closed_inside_range:
             continue
 
         div_start = max(1, idx - 8)
-        obv_bear_div = has_bearish_divergence(df["high"], df["obv"], div_start, idx)
-        rsi_bear_div = has_bearish_divergence(df["high"], df["rsi"], div_start, idx)
-
-        active_divs = []
-        if obv_bear_div:
-            active_divs.append("OBV")
-        if rsi_bear_div:
-            active_divs.append("RSI")
-
-        if not active_divs:
-            continue
-
-        wick_pct = calc_upper_wick_ratio(crt_bar)
-        targets = get_remaining_targets(df, idx, current_price)
-
-        div_text = " + ".join(active_divs)
-        targets_text = " ، ".join(targets) if targets else "غير متوفرة حالياً"
         status_note = " (شمعة جارية)" if (idx == len(df) - 1 and cfg["allow_unclosed"]) else ""
 
-        subject = f"إشارة CRT | {symbol} ({cfg['label']}) - دايفرجنس {div_text}"
-        msg = (
-            f"📊 الشركة: {symbol}{status_note}\n"
-            f"🕒 الفريم: {cfg['label']}\n"
-            f"🎯 الأهداف: {targets_text}\n"
-            f"📏 نسبة الذيل: {wick_pct:.0f}%\n"
-            f"📉 دايفرجنس سلبي: {div_text}"
-        )
-        alerts.append((subject, msg))
+        # قراءة الدايفرجنس السلبي عند سحب القمة والإغلاق داخل النطاق
+        if crt_high > range_high:
+            obv_bear = has_bearish_divergence(df["high"], df["obv"], div_start, idx)
+            rsi_bear = has_bearish_divergence(df["high"], df["rsi"], div_start, idx)
+            bear_divs = [d for d, ok in [("OBV", obv_bear), ("RSI", rsi_bear)] if ok]
+
+            if bear_divs:
+                wick_pct = calc_wick_ratio(crt_bar, "bearish")
+                targets = get_remaining_targets(df, idx, current_price, "bearish")
+                div_text = " + ".join(bear_divs)
+                targets_text = " ، ".join(targets) if targets else "غير متوفرة حالياً"
+
+                subject = f"إشارة CRT سلبية | {symbol} ({cfg['label']}) - {div_text}"
+                msg = (
+                    f"📊 الشركة: {symbol}{status_note}\n"
+                    f"🕒 الفريم: {cfg['label']}\n"
+                    f"🎯 الأهداف: {targets_text}\n"
+                    f"📏 نسبة الذيل العلوي: {wick_pct:.0f}%\n"
+                    f"📉 دايفرجنس سلبي: {div_text}"
+                )
+                alerts.append((subject, msg))
+
+        # قراءة الدايفرجنس الإيجابي عند كسر القاع والإغلاق داخل النطاق
+        if crt_low < range_low:
+            obv_bull = has_bullish_divergence(df["low"], df["obv"], div_start, idx)
+            rsi_bull = has_bullish_divergence(df["low"], df["rsi"], div_start, idx)
+            bull_divs = [d for d, ok in [("OBV", obv_bull), ("RSI", rsi_bull)] if ok]
+
+            if bull_divs:
+                wick_pct = calc_wick_ratio(crt_bar, "bullish")
+                targets = get_remaining_targets(df, idx, current_price, "bullish")
+                div_text = " + ".join(bull_divs)
+                targets_text = " ، ".join(targets) if targets else "غير متوفرة حالياً"
+
+                subject = f"إشارة CRT إيجابية | {symbol} ({cfg['label']}) - {div_text}"
+                msg = (
+                    f"📊 الشركة: {symbol}{status_note}\n"
+                    f"🕒 الفريم: {cfg['label']}\n"
+                    f"🎯 الأهداف: {targets_text}\n"
+                    f"📏 نسبة الذيل السفلي: {wick_pct:.0f}%\n"
+                    f"📈 دايفرجنس إيجابي: {div_text}"
+                )
+                alerts.append((subject, msg))
 
     return alerts
 
